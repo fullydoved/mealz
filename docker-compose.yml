@@ -1,0 +1,13 @@
+services:
+  mealz:
+    build: .
+    ports:
+      - "8851:8851"
+    volumes:
+      - mealz-data:/data
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    restart: unless-stopped
+
+volumes:
+  mealz-data:
