@@ -12,7 +12,33 @@ A meal planning app for two people. Every Friday at 8PM, Mike and his wife sit d
 - **Routing**: react-router-dom
 - **Date handling**: date-fns
 
-## Running the App
+## Docker Deployment (Production)
+
+Single-container deployment — intended for a local network server (e.g. Unraid).
+
+```bash
+# Clone and configure
+git clone git@github.com:fullydoved/mealz.git
+cd mealz
+echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
+
+# Build and run
+docker compose up -d
+```
+
+- Accessible at `http://<host-ip>:8851`
+- Multi-stage Dockerfile: Node builds the frontend, Python slim image serves everything
+- FastAPI serves the built SPA with fallback routing (no separate web server needed)
+- Alembic migrations run automatically on container start (`start.sh`)
+- SQLite database persists in a Docker volume (`mealz-data` → `/data/mealz.db`)
+- `ANTHROPIC_API_KEY` is passed via environment variable (from `.env` or docker-compose override)
+
+To rebuild after pulling changes:
+```bash
+git pull && docker compose up -d --build
+```
+
+## Local Development
 
 ```bash
 # Backend (port 8851 — do NOT use 8000, it's taken)
@@ -25,23 +51,34 @@ cd frontend && npm run dev
 - Python venv: always use `./venv/bin/pip` and `./venv/bin/python`
 - Frontend proxies `/api/*` to `http://localhost:8851` (configured in `vite.config.ts`)
 - API docs available at `http://localhost:8851/docs`
+- In dev mode, the static file serving in `main.py` is inactive (no `static/` directory)
 
 ## Key Paths
 
 | Path | Purpose |
 |------|---------|
-| `./venv/` | Python 3.12 virtual environment |
-| `./.env` | `ANTHROPIC_API_KEY` — gitignored, never committed |
-| `./mealz.db` | SQLite database file — gitignored |
+| `./venv/` | Python 3.12 virtual environment (local dev only) |
+| `./.env` | `ANTHROPIC_API_KEY` — **gitignored, never committed** |
+| `./mealz.db` | SQLite database file — **gitignored** |
+| `Dockerfile` | Multi-stage production build |
+| `docker-compose.yml` | Production deployment config |
+| `start.sh` | Container entrypoint (migrations + uvicorn) |
 | `backend/alembic/` | Database migrations |
 | `backend/app/` | FastAPI application |
 | `frontend/src/` | React application |
+
+## Security
+
+This is a **public repo**. The following are gitignored and must never be committed:
+- `.env` — contains `ANTHROPIC_API_KEY`
+- `mealz.db` — user data
+- `venv/` — local Python environment
 
 ## Project Structure
 
 ### Backend (`backend/app/`)
 
-- **`main.py`** — FastAPI app setup, CORS middleware, router registration
+- **`main.py`** — FastAPI app setup, CORS middleware, router registration, static file serving (production)
 - **`config.py`** — Settings loaded from `.env` (database URL, API key)
 - **`database.py`** — SQLAlchemy engine, session factory, `Base` class, `get_db` dependency
 - **`models/`** — SQLAlchemy ORM models:
@@ -58,7 +95,8 @@ cd frontend && npm run dev
   - `chat.py` — Chat session creation, message history, SSE streaming
 - **`services/`** — Business logic:
   - `grocery.py` — Aggregates ingredients across all non-leftover meal slots, sums quantities by ingredient+unit, groups by category
-  - `chat.py` — Builds context (week plan meals or full recipe), manages conversation history (20-message sliding window), streams Claude Haiku responses
+  - `chat.py` — Builds context (week plan meals or full recipe), manages conversation history (20-message sliding window), streams Claude Haiku responses with tool-use loop
+  - `tool_executor.py` — Executes AI tool calls: `create_recipe`, `update_recipe`, `add_to_plan` (with ingredient resolution)
 
 ### Frontend (`frontend/src/`)
 
@@ -66,13 +104,13 @@ cd frontend && npm run dev
 - **`App.tsx`** — Top-level layout with nav tabs (Plan / Recipes / Grocery) and route definitions
 - **`api/index.ts`** — All API client functions (typed fetch wrappers + SSE streaming generator)
 - **`types/index.ts`** — TypeScript interfaces matching backend schemas
-- **`hooks/useWeekNavigation.ts`** — Week navigation state (prev/next/today, computes Monday start)
+- **`hooks/useWeekNavigation.ts`** — Week navigation state (prev/next/today, computes Saturday start)
 - **`components/`**:
   - `ui/` — Shared primitives: `Button` (variants: primary/secondary/danger/ghost), `Modal` (dialog-based), `Card`
   - `recipes/` — `RecipeList` (search + grid), `RecipeDetail` (full view + delete), `RecipeForm` (create/edit with ingredient autocomplete and inline creation)
-  - `calendar/` — `WeekCalendar` (7-day grid with dnd-kit drag-and-drop), `DayColumn` (droppable), `MealSlotCard` (draggable, leftover toggle), `RecipePicker` (modal search to assign recipe to slot)
+  - `calendar/` — `MonthCalendar` (month grid with dnd-kit drag-and-drop, multi-week-plan queries), `DayCell` (droppable), `MealSlotCard` (draggable, compact mode, click-to-navigate), `RecipePicker` (modal search to assign recipe to slot)
   - `grocery/` — `GroceryListView` (category-grouped checklist with strike-through)
-  - `chat/` — `ChatSidebar` (session management + streaming display + quick actions), `ChatMessage` (user/assistant bubbles), `ChatInput` (textarea with Enter-to-send)
+  - `chat/` — `ChatSidebar` (session management + streaming display + tool status indicators + query invalidation), `ChatMessage` (user/assistant bubbles with markdown rendering), `ChatInput` (textarea with Enter-to-send)
 
 ## API Endpoints
 
@@ -109,7 +147,7 @@ cd frontend && npm run dev
 - **`ingredients`** — Canonical ingredient list (name unique, category, default_unit)
 - **`recipes`** — Name, description, servings (default 2), prep/cook time, instructions (markdown), tags (JSON array)
 - **`recipe_ingredients`** — Association: recipe_id + ingredient_id + quantity + unit + preparation + optional flag
-- **`week_plans`** — One per week, keyed by `week_start` (Monday, unique)
+- **`week_plans`** — One per week, keyed by `week_start` (Saturday, unique)
 - **`meal_slots`** — Belongs to week_plan, has date + meal_type + recipe_id + is_leftover + leftover_source_id + sort_order
 - **`chat_sessions`** / **`chat_messages`** — Conversation history with context links
 
@@ -119,7 +157,7 @@ cd frontend && npm run dev
 - Recipes target 2 servings by default
 - Python uses type hints throughout
 - Frontend uses TypeScript strict mode
-- Week starts on Monday
+- Week starts on Saturday (Saturday through Friday)
 - Grocery list skips leftover slots when aggregating
 - Chat uses a 20-message sliding window for context
 - AI model: `claude-haiku-4-5-20251001`
